@@ -325,6 +325,7 @@ fun TutorSupremeControlsSheet(
     onMuteParticipant: (LiveRoomParticipant, Boolean) -> Unit,
     onSpotlightParticipant: (String?) -> Unit,
     onKickParticipant: (LiveRoomParticipant) -> Unit,
+    onAllowRejoin: (String) -> Unit = {},
     onEndClassForAll: () -> Unit
 ) {
     var confirmEndClass by remember { mutableStateOf(false) }
@@ -333,6 +334,16 @@ fun TutorSupremeControlsSheet(
     }
     val raisedHands = remember(students) {
         students.filter { it.isHandRaised }
+    }
+    val removedEntries = remember(policy.kickedUserIds, policy.kickedUsers, participants) {
+        val ids = (policy.kickedUserIds + policy.kickedUsers.keys +
+            participants.filter { it.isKicked }.map { it.userId }).distinct()
+        ids.map { uid ->
+            val name = policy.kickedUsers[uid]
+                ?: participants.firstOrNull { it.userId == uid }?.name
+                ?: "Student (${uid.take(6)})"
+            uid to name
+        }
     }
 
     if (confirmEndClass) {
@@ -706,6 +717,71 @@ fun TutorSupremeControlsSheet(
                     }
                 }
             }
+
+            // Removed Students — Allow Rejoin Controls
+            if (removedEntries.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "Removed Students — Rejoin Access (${removedEntries.size})",
+                        color = Color(0xFFFF8A80),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                items(removedEntries, key = { "removed_${it.first}" }) { (uid, displayName) ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF241720),
+                        border = BorderStroke(1.dp, SlatyError.copy(alpha = 0.45f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = displayName,
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "Currently blocked from re-entering room",
+                                    color = Color(0xFFFFB4AB),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Button(
+                                onClick = { onAllowRejoin(uid) },
+                                colors = ButtonDefaults.buttonColors(containerColor = SlatyMint),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .testTag("allow_rejoin_button_${uid}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PersonAdd,
+                                    contentDescription = "Allow Rejoin",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Allow Rejoin",
+                                    color = Color.Black,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -962,6 +1038,8 @@ fun ClassroomStatusGateScreen(
     description: String,
     accentColor: Color,
     isErrorIcon: Boolean = false,
+    rateTutorLabel: String = "Rate Tutor",
+    onRateTutor: (() -> Unit)? = null,
     onExit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1019,6 +1097,22 @@ fun ClassroomStatusGateScreen(
                 lineHeight = 20.sp
             )
             Spacer(modifier = Modifier.height(28.dp))
+            if (onRateTutor != null) {
+                Button(
+                    onClick = onRateTutor,
+                    colors = ButtonDefaults.buttonColors(containerColor = SlatyMint),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("gate_rate_tutor_button")
+                ) {
+                    Icon(Icons.Default.Star, contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(rateTutorLabel, color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
             Button(
                 onClick = onExit,
                 colors = ButtonDefaults.buttonColors(containerColor = SlatyPrimary),
@@ -1032,6 +1126,148 @@ fun ClassroomStatusGateScreen(
             }
         }
     }
+}
+
+/**
+ * Interactive 5-Star End-of-Class Tutor Rating Dialog shown to students upon leaving or class end.
+ */
+@Composable
+fun RateTutorEndOfClassDialog(
+    tutorName: String,
+    classTitle: String,
+    confirmButtonLabel: String = "Submit Rating",
+    dismissButtonLabel: String = "Skip",
+    onDismiss: () -> Unit,
+    onSubmit: (stars: Int, comment: String) -> Unit
+) {
+    var selectedStars by remember { mutableIntStateOf(5) }
+    var comment by remember { mutableStateOf("") }
+
+    val ratingLabel = when (selectedStars) {
+        1 -> "Needs Improvement"
+        2 -> "Fair Session"
+        3 -> "Good Class"
+        4 -> "Great Explanation"
+        else -> "Outstanding Tutor!"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF1A162B),
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFFFB800).copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Rate Tutor",
+                        tint = Color(0xFFFFB800),
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Rate Your Tutor",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 19.sp
+                )
+            }
+        },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "$tutorName • $classTitle",
+                    color = SlatyTextSecondary,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    (1..5).forEach { star ->
+                        val active = star <= selectedStars
+                        IconButton(
+                            onClick = { selectedStars = star },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("rate_star_$star")
+                        ) {
+                            Icon(
+                                imageVector = if (active) Icons.Default.Star else Icons.Default.StarBorder,
+                                contentDescription = "$star Star",
+                                tint = if (active) Color(0xFFFFB800) else Color(0xFF5D5678),
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "$selectedStars / 5 — $ratingLabel",
+                    color = SlatyMint,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                OutlinedTextField(
+                    value = comment,
+                    onValueChange = { comment = it },
+                    placeholder = { Text("Share quick feedback (optional)", color = Color.Gray, fontSize = 12.sp) },
+                    singleLine = false,
+                    maxLines = 3,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = SlatyMint,
+                        unfocusedBorderColor = Color(0xFF393254),
+                        focusedContainerColor = Color(0xFF120F1F),
+                        unfocusedContainerColor = Color(0xFF120F1F)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("rate_tutor_comment_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSubmit(selectedStars, comment.trim()) },
+                colors = ButtonDefaults.buttonColors(containerColor = SlatyMint),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("submit_tutor_rating_button")
+            ) {
+                Text(confirmButtonLabel, color = Color.Black, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("skip_tutor_rating_button")
+            ) {
+                Text(dismissButtonLabel, color = Color.White)
+            }
+        }
+    )
 }
 
 /**

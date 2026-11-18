@@ -54,7 +54,7 @@ fun MainDashboardScreen(
     liveClasses: List<LiveClassSession>,
     communities: List<Community>,
     cbtSubjects: List<CbtSubject> = emptyList(),
-    onJoinLiveClass: (roomCode: String, title: String) -> Unit,
+    onJoinLiveClass: (roomCode: String, title: String, tutorId: String, tutorName: String) -> Unit,
     onOpenStudyGroup: (Community) -> Unit,
     onAskQuestionClick: () -> Unit,
     onStartCbtClick: (subject: String) -> Unit,
@@ -143,7 +143,7 @@ fun MainDashboardScreen(
                 onJoinLive = {
                     val ongoing = liveClasses.firstOrNull { it.isLive } ?: liveClasses.firstOrNull()
                     if (ongoing != null) {
-                        onJoinLiveClass(ongoing.roomCode, ongoing.title)
+                        onJoinLiveClass(ongoing.roomCode, ongoing.title, ongoing.tutorId, ongoing.tutorName)
                     } else {
                         onViewAllClasses()
                     }
@@ -249,7 +249,7 @@ fun MainDashboardScreen(
                 LiveClassCard(
                     session = liveSession,
                     pulseAlpha = pulseAlpha,
-                    onJoin = { onJoinLiveClass(liveSession.roomCode, liveSession.title) }
+                    onJoin = { onJoinLiveClass(liveSession.roomCode, liveSession.title, liveSession.tutorId, liveSession.tutorName) }
                 )
             }
         }

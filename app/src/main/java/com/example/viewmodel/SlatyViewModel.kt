@@ -35,7 +35,13 @@ sealed interface SubScreen {
     data class CbtPractice(val subject: String) : SubScreen
     data class CommunityChat(val community: Community) : SubScreen
     data class PrivateChat(val conversation: PrivateConversation) : SubScreen
-    data class LiveVideoRoom(val title: String, val roomCode: String, val isHost: Boolean) : SubScreen
+    data class LiveVideoRoom(
+        val title: String,
+        val roomCode: String,
+        val isHost: Boolean,
+        val tutorId: String = "",
+        val tutorName: String = ""
+    ) : SubScreen
     object Notifications : SubScreen
     object UserProfile : SubScreen
     object AuthWelcome : SubScreen
@@ -69,6 +75,7 @@ class SlatyViewModel(application: Application) : AndroidViewModel(application) {
     val privateChats = repository.privateChats
     val notifications = repository.notifications
     val filteredNotifications = repository.filteredNotifications
+    val communityNotificationEvents = repository.communityNotificationEvents
     val taskRepository = repository.taskRepository
     val studentAcademicTasks = taskRepository.allTasks.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val studentAssignments = taskRepository.assignments.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -396,11 +403,14 @@ class SlatyViewModel(application: Application) : AndroidViewModel(application) {
 
     fun navigateTo(sub: SubScreen) {
         _subScreen.value = sub
+        val activeCommId = (sub as? SubScreen.CommunityChat)?.community?.id
+        repository.setActiveCommunityChat(activeCommId)
     }
 
     fun goBack(): Boolean {
         if (_subScreen.value !is SubScreen.None) {
             _subScreen.value = SubScreen.None
+            repository.setActiveCommunityChat(null)
             return true
         }
         return false
@@ -614,8 +624,21 @@ class SlatyViewModel(application: Application) : AndroidViewModel(application) {
         _subScreen.value = SubScreen.LiveVideoRoom(
             title = session.title,
             roomCode = session.roomCode,
-            isHost = true
+            isHost = true,
+            tutorId = session.tutorId,
+            tutorName = session.tutorName
         )
+    }
+
+    fun submitTutorRating(
+        tutorId: String,
+        tutorName: String,
+        roomCode: String,
+        stars: Int,
+        comment: String
+    ) {
+        repository.submitTutorRating(tutorId, tutorName, roomCode, stars, comment)
+        showFeedback("Thanks! Your $stars-star rating for $tutorName has been saved.")
     }
 
     fun joinCommunity(id: String) {
@@ -630,6 +653,15 @@ class SlatyViewModel(application: Application) : AndroidViewModel(application) {
 
     fun isCommunityJoined(id: String): Boolean {
         return repository.isCommunityJoined(id)
+    }
+
+    fun deleteCommunity(id: String) {
+        val deleted = repository.deleteCommunity(id)
+        if (deleted) {
+            showFeedback("Study community deleted for all members.")
+        } else {
+            showFeedback("Only the group creator can delete this community.")
+        }
     }
 
     // Payout details update

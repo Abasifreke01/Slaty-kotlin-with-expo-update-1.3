@@ -27,15 +27,62 @@ import com.example.ui.theme.*
 fun ConnectScreen(
     communities: List<Community>,
     joinedCommunityIds: Set<String> = emptySet(),
+    currentUserId: String = "",
     privateChats: List<PrivateConversation>,
     onCommunityClick: (Community) -> Unit,
     onJoinCommunity: (String) -> Unit = {},
     onLeaveCommunity: (String) -> Unit = {},
+    onDeleteCommunity: (Community) -> Unit = {},
     onPrivateChatClick: (PrivateConversation) -> Unit,
     onCreateCommunityClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedSegment by remember { mutableStateOf("communities") } // "communities" or "chats"
+    var communityPendingDelete by remember { mutableStateOf<Community?>(null) }
+
+    communityPendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { communityPendingDelete = null },
+            containerColor = Color(0xFF1F1C2F),
+            title = {
+                Text(
+                    text = "Delete Study Group?",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "Permanently delete '${target.name}' and its messages across all devices? This cannot be undone.",
+                    color = SlatyTextSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteCommunity(target)
+                        communityPendingDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SlatyError),
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag("confirm_delete_community_button")
+                ) {
+                    Text("Delete Group", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { communityPendingDelete = null },
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+                ) {
+                    Text("Cancel", color = Color.White)
+                }
+            }
+        )
+    }
 
     Column(
         modifier = modifier
@@ -143,6 +190,9 @@ fun ConnectScreen(
             ) {
                 items(communities, key = { it.id }) { comm ->
                     val isJoined = joinedCommunityIds.contains(comm.id)
+                    val isCreator = comm.createdById.isNotBlank() &&
+                        currentUserId.isNotBlank() &&
+                        comm.createdById == currentUserId
 
                     Surface(
                         modifier = Modifier
@@ -209,6 +259,21 @@ fun ConnectScreen(
                                                 )
                                             }
                                         }
+                                        if (isCreator) {
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = SlatyPrimary.copy(alpha = 0.3f)
+                                            ) {
+                                                Text(
+                                                    text = "CREATOR",
+                                                    color = SlatyLavender,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
                                         if (comm.unreadCount > 0 && isJoined) {
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Box(
@@ -227,8 +292,9 @@ fun ConnectScreen(
                                         maxLines = 2
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
+                                    val creatorSuffix = if (comm.createdByName.isNotBlank()) " • by ${comm.createdByName}" else ""
                                     Text(
-                                        text = "${comm.memberCount} active learners • ${comm.category}",
+                                        text = "${comm.memberCount} active learners • ${comm.category}$creatorSuffix",
                                         color = Color(0xFF748C94),
                                         fontSize = 11.sp
                                     )
@@ -242,13 +308,37 @@ fun ConnectScreen(
                                 horizontalArrangement = Arrangement.End,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                if (isCreator) {
+                                    OutlinedButton(
+                                        onClick = { communityPendingDelete = comm },
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = SlatyError),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, SlatyError.copy(alpha = 0.6f)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .defaultMinSize(minHeight = 40.dp)
+                                            .testTag("delete_community_${comm.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = "Delete Study Group",
+                                            tint = Color(0xFFFF8A80),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Delete", fontSize = 11.sp, color = Color(0xFFFF8A80), fontWeight = FontWeight.Bold)
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
+
                                 if (isJoined) {
                                     OutlinedButton(
                                         onClick = { onLeaveCommunity(comm.id) },
                                         shape = RoundedCornerShape(8.dp),
                                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF6B6B)),
                                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF552233)),
-                                        modifier = Modifier.height(34.dp).testTag("leave_comm_${comm.id}")
+                                        modifier = Modifier.defaultMinSize(minHeight = 40.dp).testTag("leave_comm_${comm.id}")
                                     ) {
                                         Text("Leave", fontSize = 11.sp, color = Color(0xFFFF8888))
                                     }
@@ -259,7 +349,7 @@ fun ConnectScreen(
                                         onClick = { onCommunityClick(comm) },
                                         shape = RoundedCornerShape(8.dp),
                                         colors = ButtonDefaults.buttonColors(containerColor = SlatyPrimary),
-                                        modifier = Modifier.height(34.dp).testTag("enter_chat_${comm.id}")
+                                        modifier = Modifier.defaultMinSize(minHeight = 40.dp).testTag("enter_chat_${comm.id}")
                                     ) {
                                         Icon(Icons.Default.Chat, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
                                         Spacer(modifier = Modifier.width(4.dp))
@@ -272,7 +362,7 @@ fun ConnectScreen(
                                         },
                                         shape = RoundedCornerShape(8.dp),
                                         colors = ButtonDefaults.buttonColors(containerColor = SlatyMint),
-                                        modifier = Modifier.height(34.dp).testTag("join_community_btn_${comm.id}")
+                                        modifier = Modifier.defaultMinSize(minHeight = 40.dp).testTag("join_community_btn_${comm.id}")
                                     ) {
                                         Icon(Icons.Default.GroupAdd, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
                                         Spacer(modifier = Modifier.width(4.dp))

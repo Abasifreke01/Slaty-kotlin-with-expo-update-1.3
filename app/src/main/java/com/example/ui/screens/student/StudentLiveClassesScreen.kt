@@ -24,7 +24,7 @@ import com.example.ui.theme.*
 @Composable
 fun StudentLiveClassesScreen(
     classes: List<LiveClassSession>,
-    onJoinClass: (roomCode: String, title: String) -> Unit,
+    onJoinClass: (roomCode: String, title: String, tutorId: String, tutorName: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var classLinkInput by remember { mutableStateOf("") }
@@ -102,7 +102,7 @@ fun StudentLiveClassesScreen(
                         onClick = {
                             val raw = classLinkInput.trim().ifEmpty { "slaty-general-live" }
                             val code = com.example.data.repository.LiveClassRepository.normalizeRoomCode(raw)
-                            onJoinClass(code, "Live Masterclass")
+                            onJoinClass(code, "Live Masterclass", "", "")
                         },
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = SlatyPrimary),
@@ -236,7 +236,7 @@ fun StudentLiveClassesScreen(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     Button(
-                        onClick = { onJoinClass(session.roomCode, session.title) },
+                        onClick = { onJoinClass(session.roomCode, session.title, session.tutorId, session.tutorName) },
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isFree) SlatyMint else if (session.isLive) SlatyPrimary else Color(0xFF2F2948)

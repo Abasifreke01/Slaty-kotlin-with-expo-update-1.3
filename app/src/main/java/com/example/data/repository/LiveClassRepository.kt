@@ -229,6 +229,15 @@ class LiveClassRepository(
                         val kickedRaw = (snapshot.get("kickedUserIds") as? List<*>)
                             ?.mapNotNull { it as? String }
                             ?: emptyList()
+                        val kickedUsersRaw = (snapshot.get("kickedUsers") as? Map<*, *>)
+                            ?.entries
+                            ?.mapNotNull { entry ->
+                                val key = entry.key as? String ?: return@mapNotNull null
+                                val value = entry.value as? String ?: "Removed Student"
+                                key to value
+                            }
+                            ?.toMap()
+                            ?: emptyMap()
                         trySend(
                             LiveRoomPolicy(
                                 hostId = snapshot.getString("hostId") ?: "",
@@ -244,6 +253,7 @@ class LiveClassRepository(
                                 screenShareTitle = snapshot.getString("screenShareTitle") ?: "",
                                 isClassEnded = snapshot.getBoolean("isClassEnded") ?: false,
                                 kickedUserIds = kickedRaw,
+                                kickedUsers = kickedUsersRaw,
                                 updatedAt = snapshot.getLong("updatedAt") ?: System.currentTimeMillis()
                             )
                         )
@@ -420,17 +430,28 @@ class LiveClassRepository(
     }
 
     /**
-     * Kicks a student out of the live classroom and blocks re-entry.
+     * Kicks a student out of the live classroom and blocks re-entry until permitted.
      */
-    suspend fun kickParticipant(roomCode: String, targetUserId: String) {
+    suspend fun kickParticipant(roomCode: String, targetUserId: String, targetName: String = "") {
         val fs = firestore ?: return
         val canonicalRoom = normalizeRoomCode(roomCode)
         try {
+            val safeName = targetName.ifBlank { "Removed Student" }
+            val existingUsersMap = try {
+                val snap = fs.collection(COLLECTION_LIVE_ROOMS).document(canonicalRoom).get().await()
+                @Suppress("UNCHECKED_CAST")
+                (snap.get("kickedUsers") as? Map<String, String>)?.toMutableMap() ?: mutableMapOf()
+            } catch (_: Exception) {
+                mutableMapOf()
+            }
+            existingUsersMap[targetUserId] = safeName
+
             fs.collection(COLLECTION_LIVE_ROOMS)
                 .document(canonicalRoom)
                 .set(
                     mapOf(
                         "kickedUserIds" to FieldValue.arrayUnion(targetUserId),
+                        "kickedUsers" to existingUsersMap,
                         "updatedAt" to System.currentTimeMillis()
                     ),
                     SetOptions.merge()
@@ -444,6 +465,42 @@ class LiveClassRepository(
                 .await()
         } catch (e: Exception) {
             Log.w(TAG, "Error kicking participant: ${e.message}")
+        }
+    }
+
+    /**
+     * Allows a previously removed student to rejoin the live classroom.
+     */
+    suspend fun allowParticipantRejoin(roomCode: String, targetUserId: String) {
+        val fs = firestore ?: return
+        val canonicalRoom = normalizeRoomCode(roomCode)
+        try {
+            val roomRef = fs.collection(COLLECTION_LIVE_ROOMS).document(canonicalRoom)
+            val snap = roomRef.get().await()
+            @Suppress("UNCHECKED_CAST")
+            val updatedUsersMap = (snap.get("kickedUsers") as? Map<String, String>)
+                ?.filterKeys { it != targetUserId }
+                ?: emptyMap()
+
+            roomRef.update(
+                mapOf(
+                    "kickedUserIds" to FieldValue.arrayRemove(targetUserId),
+                    "kickedUsers" to updatedUsersMap,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+            ).await()
+
+            try {
+                roomRef.collection(SUBCOLLECTION_PARTICIPANTS)
+                    .document(targetUserId)
+                    .update("isKicked", false)
+                    .await()
+            } catch (_: Exception) {
+                // Participant doc may already be deleted on leaveRoom; that is expected.
+            }
+            Log.i(TAG, "Allowed user $targetUserId to rejoin live room $canonicalRoom")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error allowing participant rejoin: ${e.message}")
         }
     }
 

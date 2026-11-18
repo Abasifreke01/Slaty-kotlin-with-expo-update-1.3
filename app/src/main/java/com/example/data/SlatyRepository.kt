@@ -18,14 +18,34 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import org.json.JSONArray
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 class SlatyRepository(private val context: Context) {
+
+    companion object {
+        fun calculateNewAverageRating(
+            currentRating: Double,
+            currentCount: Int,
+            newStars: Int
+        ): Pair<Double, Int> {
+            val clampedStars = newStars.coerceIn(1, 5).toDouble()
+            val safeCount = maxOf(0, currentCount)
+            val newCount = safeCount + 1
+            val rawAvg = ((currentRating * safeCount) + clampedStars) / newCount
+            val rounded = Math.round(rawAvg * 100.0) / 100.0
+            return rounded to newCount
+        }
+    }
 
     private val repoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     val taskSyncRepository = TaskSyncRepository.create(context, repoScope)
@@ -133,6 +153,7 @@ class SlatyRepository(private val context: Context) {
                                     bio = doc.getString("bio") ?: "",
                                     hourlyRate = doc.getDouble("hourlyRate") ?: 3500.0,
                                     rating = doc.getDouble("rating") ?: 4.9,
+                                    reviewsCount = doc.getLong("reviewsCount")?.toInt() ?: 0,
                                     studentsCount = doc.getLong("studentsCount")?.toInt() ?: 142,
                                     bankName = doc.getString("bankName") ?: "GTBank",
                                     accountNumber = doc.getString("accountNumber") ?: "0123456789",
@@ -142,6 +163,7 @@ class SlatyRepository(private val context: Context) {
                                     department = doc.getString("department") ?: "Computer Science",
                                     academicLevel = doc.getString("academicLevel") ?: "Undergraduate"
                                 )
+                                updateOnlinePresence(uid, true)
                             } else {
                                 _currentUser.value = User(
                                     id = uid,
@@ -150,6 +172,7 @@ class SlatyRepository(private val context: Context) {
                                     email = email,
                                     role = UserRole.STUDENT
                                 )
+                                updateOnlinePresence(uid, true)
                             }
                         }
                     } catch (e: Exception) {
@@ -175,6 +198,10 @@ class SlatyRepository(private val context: Context) {
                 android.util.Log.w("SlatyRepo", "Live classes sync error: ${e.message}")
             }
         }
+
+        // Real-time cross-device sync for Study Communities, online notifications, and Tutor ratings
+        observeCommunitiesFromFirestore()
+        observeTutorsFromFirestore()
     }
 
     // Tutors List
@@ -418,6 +445,52 @@ class SlatyRepository(private val context: Context) {
     )
     val joinedCommunityIds: StateFlow<Set<String>> = _joinedCommunityIds.asStateFlow()
 
+    private val _communityNotificationEvents = MutableSharedFlow<CommunityNotificationEvent>(extraBufferCapacity = 16)
+    val communityNotificationEvents: SharedFlow<CommunityNotificationEvent> = _communityNotificationEvents.asSharedFlow()
+
+    private val _activeCommunityChatId = MutableStateFlow<String?>(null)
+    private val lastNotifiedCommunityMsgTime = ConcurrentHashMap<String, Long>()
+    private var initialCommunitySnapshotLoaded = false
+
+    fun setActiveCommunityChat(communityId: String?) {
+        _activeCommunityChatId.value = communityId
+        if (communityId != null) {
+            _communities.value = _communities.value.map {
+                if (it.id == communityId) it.copy(unreadCount = 0) else it
+            }
+        }
+    }
+
+    private fun getCurrentActorId(): String {
+        val localId = _currentUser.value?.id
+        if (!localId.isNullOrBlank()) return localId
+        return try { FirebaseAuth.getInstance().currentUser?.uid ?: "" } catch (_: Exception) { "" }
+    }
+
+    private fun isCurrentActor(senderId: String): Boolean {
+        if (senderId.isBlank()) return false
+        val localId = _currentUser.value?.id
+        val authUid = try { FirebaseAuth.getInstance().currentUser?.uid } catch (_: Exception) { null }
+        return (localId != null && senderId == localId) || (authUid != null && senderId == authUid)
+    }
+
+    private fun updateOnlinePresence(uid: String, isOnline: Boolean) {
+        val fs = firestore ?: return
+        if (uid.isBlank()) return
+        repoScope.launch {
+            try {
+                fs.collection("users").document(uid).set(
+                    mapOf(
+                        "isOnline" to isOnline,
+                        "lastSeenAt" to System.currentTimeMillis()
+                    ),
+                    SetOptions.merge()
+                ).await()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun joinCommunity(communityId: String) {
         val updated = _joinedCommunityIds.value + communityId
         _joinedCommunityIds.value = updated
@@ -426,6 +499,17 @@ class SlatyRepository(private val context: Context) {
         if (comm != null) {
             _communities.value = _communities.value.map {
                 if (it.id == communityId) it.copy(memberCount = it.memberCount + 1) else it
+            }
+        }
+        val fs = firestore
+        if (fs != null) {
+            repoScope.launch {
+                try {
+                    fs.collection("communities").document(communityId)
+                        .set(mapOf("memberCount" to FieldValue.increment(1)), SetOptions.merge())
+                        .await()
+                } catch (_: Exception) {
+                }
             }
         }
     }
@@ -440,10 +524,29 @@ class SlatyRepository(private val context: Context) {
                 if (it.id == communityId) it.copy(memberCount = maxOf(1, it.memberCount - 1)) else it
             }
         }
+        val fs = firestore
+        if (fs != null && (comm?.memberCount ?: 1) > 1) {
+            repoScope.launch {
+                try {
+                    fs.collection("communities").document(communityId)
+                        .set(mapOf("memberCount" to FieldValue.increment(-1)), SetOptions.merge())
+                        .await()
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     fun isCommunityJoined(communityId: String): Boolean {
         return _joinedCommunityIds.value.contains(communityId)
+    }
+
+    fun isCommunityCreator(community: Community, userId: String?): Boolean {
+        if (community.createdById.isBlank()) return false
+        val localId = userId?.takeIf { it.isNotBlank() }
+        val authUid = try { FirebaseAuth.getInstance().currentUser?.uid } catch (_: Exception) { null }
+        return (localId != null && community.createdById == localId) ||
+            (authUid != null && community.createdById == authUid)
     }
 
     // Notifications
@@ -1096,6 +1199,8 @@ class SlatyRepository(private val context: Context) {
                             mapOf(
                                 "lastMessage" to text,
                                 "lastMessageTime" to timestamp,
+                                "lastSenderId" to user.id,
+                                "lastSenderName" to user.name,
                                 "updatedAt" to timestamp
                             ),
                             SetOptions.merge()
@@ -1274,17 +1379,375 @@ class SlatyRepository(private val context: Context) {
         }
     }
 
+    private fun observeCommunitiesFromFirestore() {
+        val fs = firestore ?: return
+        try {
+            fs.collection("communities").addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.w("SlatyRepository", "Listen to communities failed: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot == null) return@addSnapshotListener
+
+                if (snapshot.isEmpty) {
+                    val defaults = _communities.value
+                    repoScope.launch {
+                        try {
+                            defaults.forEach { comm ->
+                                val data = hashMapOf(
+                                    "id" to comm.id,
+                                    "name" to comm.name,
+                                    "description" to comm.description,
+                                    "memberCount" to comm.memberCount,
+                                    "category" to comm.category,
+                                    "unreadCount" to comm.unreadCount,
+                                    "subjects" to comm.subjects,
+                                    "academicLevels" to comm.academicLevels,
+                                    "createdById" to comm.createdById,
+                                    "createdByName" to comm.createdByName,
+                                    "createdAt" to comm.createdAt
+                                )
+                                fs.collection("communities").document(comm.id)
+                                    .set(data, SetOptions.merge()).await()
+                            }
+                        } catch (e: Exception) {
+                            Log.w("SlatyRepository", "Failed seeding communities: ${e.message}")
+                        }
+                    }
+                    initialCommunitySnapshotLoaded = true
+                    return@addSnapshotListener
+                }
+
+                val existingMap = _communities.value.associateBy { it.id }
+                val remoteList = snapshot.documents.mapNotNull { doc ->
+                    try {
+                        val id = doc.getString("id") ?: doc.id
+                        val name = doc.getString("name") ?: return@mapNotNull null
+                        val description = doc.getString("description") ?: ""
+                        val memberCount = (doc.getLong("memberCount") ?: 1L).toInt()
+                        val category = doc.getString("category") ?: "General"
+                        @Suppress("UNCHECKED_CAST")
+                        val subjects = (doc.get("subjects") as? List<*>)
+                            ?.mapNotNull { it as? String }
+                            ?.takeIf { it.isNotEmpty() } ?: listOf("General")
+                        @Suppress("UNCHECKED_CAST")
+                        val levels = (doc.get("academicLevels") as? List<*>)
+                            ?.mapNotNull { it as? String }
+                            ?.takeIf { it.isNotEmpty() } ?: listOf("Undergraduate", "JAMB/UTME")
+                        val createdById = doc.getString("createdById") ?: ""
+                        val createdByName = doc.getString("createdByName") ?: ""
+                        val createdAt = doc.getLong("createdAt") ?: 0L
+
+                        // Community Online Notifications detection for every joined member
+                        val lastMsgTime = doc.getLong("lastMessageTime") ?: 0L
+                        val lastMsgText = doc.getString("lastMessage") ?: ""
+                        val lastSenderId = doc.getString("lastSenderId") ?: ""
+                        val lastSenderName = doc.getString("lastSenderName") ?: "Member"
+                        var unreadCount = existingMap[id]?.unreadCount
+                            ?: (doc.getLong("unreadCount") ?: 0L).toInt()
+
+                        if (!initialCommunitySnapshotLoaded) {
+                            if (lastMsgTime > 0L) {
+                                lastNotifiedCommunityMsgTime[id] = lastMsgTime
+                            }
+                        } else if (lastMsgTime > 0L) {
+                            val prevTime = lastNotifiedCommunityMsgTime[id] ?: 0L
+                            if (lastMsgTime > prevTime) {
+                                lastNotifiedCommunityMsgTime[id] = lastMsgTime
+                                val isOnlineJoinedMember = _currentUser.value != null &&
+                                    _joinedCommunityIds.value.contains(id)
+                                if (isOnlineJoinedMember &&
+                                    lastSenderId.isNotBlank() &&
+                                    !isCurrentActor(lastSenderId) &&
+                                    lastMsgText.isNotBlank()
+                                ) {
+                                    if (_activeCommunityChatId.value != id) {
+                                        unreadCount += 1
+                                    }
+                                    val notifId = "notif_${id}_${lastMsgTime}"
+                                    val newNotif = NotificationItem(
+                                        id = notifId,
+                                        title = name,
+                                        message = "$lastSenderName: $lastMsgText",
+                                        timeAgo = "Just now",
+                                        isRead = false,
+                                        type = "community",
+                                        communityId = id
+                                    )
+                                    val currentNotifs = _notifications.value
+                                    if (currentNotifs.none { it.id == notifId }) {
+                                        _notifications.value = listOf(newNotif) + currentNotifs
+                                    }
+                                    _communityNotificationEvents.tryEmit(
+                                        CommunityNotificationEvent(
+                                            id = notifId,
+                                            communityId = id,
+                                            communityName = name,
+                                            senderName = lastSenderName,
+                                            messageText = lastMsgText,
+                                            timestamp = lastMsgTime
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        Community(
+                            id = id,
+                            name = name,
+                            description = description,
+                            memberCount = memberCount,
+                            category = category,
+                            unreadCount = unreadCount,
+                            subjects = subjects,
+                            academicLevels = levels,
+                            createdById = createdById,
+                            createdByName = createdByName,
+                            createdAt = createdAt
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                initialCommunitySnapshotLoaded = true
+                if (remoteList.isNotEmpty()) {
+                    _communities.value = remoteList.sortedByDescending { it.createdAt }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SlatyRepository", "Failed to attach communities listener: ${e.message}")
+        }
+    }
+
+    private fun observeTutorsFromFirestore() {
+        val fs = firestore ?: return
+        try {
+            fs.collection("tutors").addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.w("SlatyRepository", "Listen to tutors failed: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot == null) return@addSnapshotListener
+
+                if (snapshot.isEmpty) {
+                    val defaults = _tutors.value
+                    repoScope.launch {
+                        try {
+                            defaults.forEach { t ->
+                                val data = hashMapOf(
+                                    "id" to t.id,
+                                    "name" to t.name,
+                                    "username" to t.username,
+                                    "specialization" to t.specialization,
+                                    "rating" to t.rating,
+                                    "reviewsCount" to t.reviewsCount,
+                                    "hourlyRate" to t.hourlyRate,
+                                    "bio" to t.bio,
+                                    "subjects" to t.subjects,
+                                    "verified" to t.verified,
+                                    "avatarResName" to t.avatarResName,
+                                    "location" to t.location,
+                                    "academicLevels" to t.academicLevels
+                                )
+                                fs.collection("tutors").document(t.id)
+                                    .set(data, SetOptions.merge()).await()
+                            }
+                        } catch (e: Exception) {
+                            Log.w("SlatyRepository", "Failed seeding tutors: ${e.message}")
+                        }
+                    }
+                    return@addSnapshotListener
+                }
+
+                val remoteTutors = snapshot.documents.mapNotNull { doc ->
+                    try {
+                        val id = doc.getString("id") ?: doc.id
+                        val name = doc.getString("name") ?: return@mapNotNull null
+                        @Suppress("UNCHECKED_CAST")
+                        val subjects = (doc.get("subjects") as? List<*>)
+                            ?.mapNotNull { it as? String }
+                            ?.takeIf { it.isNotEmpty() } ?: listOf("General")
+                        @Suppress("UNCHECKED_CAST")
+                        val levels = (doc.get("academicLevels") as? List<*>)
+                            ?.mapNotNull { it as? String }
+                            ?.takeIf { it.isNotEmpty() } ?: listOf("Undergraduate", "JAMB/UTME")
+                        Tutor(
+                            id = id,
+                            name = name,
+                            username = doc.getString("username") ?: name.lowercase().replace(" ", "_"),
+                            specialization = doc.getString("specialization") ?: "Verified Academic Tutor",
+                            rating = doc.getDouble("rating") ?: 4.9,
+                            reviewsCount = (doc.getLong("reviewsCount") ?: 0L).toInt(),
+                            hourlyRate = doc.getDouble("hourlyRate") ?: 3500.0,
+                            bio = doc.getString("bio") ?: "Experienced tutor helping learners master coursework.",
+                            subjects = subjects,
+                            verified = doc.getBoolean("verified") ?: true,
+                            avatarResName = doc.getString("avatarResName") ?: "avatar_monogram",
+                            location = doc.getString("location") ?: "Nigeria",
+                            academicLevels = levels
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                if (remoteTutors.isNotEmpty()) {
+                    val byId = remoteTutors.associateBy { it.id }
+                    val merged = _tutors.value.map { local -> byId[local.id] ?: local } +
+                        remoteTutors.filter { r -> _tutors.value.none { it.id == r.id } }
+                    _tutors.value = merged
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SlatyRepository", "Failed to attach tutors listener: ${e.message}")
+        }
+    }
+
+    fun submitTutorRating(
+        tutorId: String,
+        tutorName: String,
+        roomCode: String,
+        stars: Int,
+        comment: String
+    ) {
+        val clampedStars = stars.coerceIn(1, 5)
+        val student = _currentUser.value
+        val studentId = student?.id ?: getCurrentActorId().ifBlank { "student_${System.currentTimeMillis()}" }
+        val studentName = student?.name ?: "Student"
+
+        // Resolve matching tutor from local catalog by ID or name
+        val currentList = _tutors.value
+        val matchedTutor = currentList.firstOrNull {
+            (tutorId.isNotBlank() && it.id == tutorId) ||
+                (tutorName.isNotBlank() && it.name.equals(tutorName, ignoreCase = true))
+        }
+        val resolvedTutorId = matchedTutor?.id ?: tutorId.ifBlank {
+            "tutor_${tutorName.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "_").trim('_')}"
+        }
+        val resolvedTutorName = matchedTutor?.name ?: tutorName.ifBlank { "Class Tutor" }
+
+        // Optimistic update on local tutor list
+        if (matchedTutor != null) {
+            val (newAvg, newCount) = calculateNewAverageRating(
+                currentRating = matchedTutor.rating,
+                currentCount = matchedTutor.reviewsCount,
+                newStars = clampedStars
+            )
+            _tutors.value = currentList.map {
+                if (it.id == matchedTutor.id) it.copy(rating = newAvg, reviewsCount = newCount) else it
+            }
+        }
+
+        // If logged in user happens to be that tutor locally, update immediately
+        if (student != null && student.id == resolvedTutorId) {
+            val baseCount = student.reviewsCount
+            val (newAvg, newCount) = if (baseCount <= 0) {
+                clampedStars.toDouble() to 1
+            } else {
+                calculateNewAverageRating(student.rating, baseCount, clampedStars)
+            }
+            _currentUser.value = student.copy(rating = newAvg, reviewsCount = newCount)
+        }
+
+        val fs = firestore ?: return
+        repoScope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val ratingDocId = "${roomCode.ifBlank { "session" }}_${resolvedTutorId}_${studentId}"
+                val ratingPayload = hashMapOf(
+                    "id" to ratingDocId,
+                    "tutorId" to resolvedTutorId,
+                    "tutorName" to resolvedTutorName,
+                    "roomCode" to roomCode,
+                    "studentId" to studentId,
+                    "studentName" to studentName,
+                    "stars" to clampedStars,
+                    "comment" to comment.trim(),
+                    "timestamp" to now
+                )
+                fs.collection("tutor_ratings").document(ratingDocId)
+                    .set(ratingPayload, SetOptions.merge()).await()
+
+                // Fetch current authoritative count/rating from tutors or users doc
+                val tutorDocRef = fs.collection("tutors").document(resolvedTutorId)
+                val tutorSnap = tutorDocRef.get().await()
+                val userDocRef = fs.collection("users").document(resolvedTutorId)
+                val userSnap = try { userDocRef.get().await() } catch (_: Exception) { null }
+
+                val existingReviewsCount = when {
+                    tutorSnap.exists() -> (tutorSnap.getLong("reviewsCount") ?: 0L).toInt()
+                    userSnap != null && userSnap.exists() -> (userSnap.getLong("reviewsCount") ?: 0L).toInt()
+                    matchedTutor != null -> matchedTutor.reviewsCount
+                    else -> 0
+                }
+                val existingRating = when {
+                    tutorSnap.exists() -> tutorSnap.getDouble("rating") ?: 0.0
+                    userSnap != null && userSnap.exists() -> userSnap.getDouble("rating") ?: 0.0
+                    matchedTutor != null -> matchedTutor.rating
+                    else -> 0.0
+                }
+
+                val (computedAvg, computedCount) = if (existingReviewsCount <= 0 && matchedTutor == null) {
+                    clampedStars.toDouble() to 1
+                } else {
+                    calculateNewAverageRating(existingRating, existingReviewsCount, clampedStars)
+                }
+
+                val tutorProfileUpdates = hashMapOf<String, Any>(
+                    "id" to resolvedTutorId,
+                    "name" to resolvedTutorName,
+                    "rating" to computedAvg,
+                    "reviewsCount" to computedCount,
+                    "verified" to true,
+                    "updatedAt" to now
+                )
+                if (!tutorSnap.exists()) {
+                    tutorProfileUpdates["username"] = resolvedTutorName.lowercase(Locale.ROOT).replace(" ", "_")
+                    tutorProfileUpdates["specialization"] = userSnap?.getString("specialization") ?: "Verified Academic Tutor"
+                    tutorProfileUpdates["hourlyRate"] = userSnap?.getDouble("hourlyRate") ?: 3500.0
+                    tutorProfileUpdates["bio"] = userSnap?.getString("bio") ?: "Verified tutor on Slaty."
+                    tutorProfileUpdates["subjects"] = listOf("General")
+                }
+                tutorDocRef.set(tutorProfileUpdates, SetOptions.merge()).await()
+
+                if (userSnap != null && userSnap.exists()) {
+                    userDocRef.set(
+                        mapOf(
+                            "rating" to computedAvg,
+                            "reviewsCount" to computedCount,
+                            "updatedAt" to now
+                        ),
+                        SetOptions.merge()
+                    ).await()
+                }
+                Log.i("SlatyRepository", "Submitted $clampedStars-star rating for $resolvedTutorName -> new avg $computedAvg ($computedCount reviews)")
+            } catch (e: Exception) {
+                Log.w("SlatyRepository", "Failed syncing tutor rating to Firestore: ${e.message}")
+            }
+        }
+    }
+
     fun createCommunity(name: String, description: String, category: String) {
         val newCommId = "comm_${System.currentTimeMillis()}"
+        val creatorId = getCurrentActorId().ifBlank { "usr_local" }
+        val creatorName = _currentUser.value?.name?.ifBlank { null }
+            ?: try { FirebaseAuth.getInstance().currentUser?.displayName } catch (_: Exception) { null }
+            ?: "Member"
+        val now = System.currentTimeMillis()
         val newComm = Community(
             id = newCommId,
             name = name,
             description = description,
             memberCount = 1,
             category = category,
-            unreadCount = 0
+            unreadCount = 0,
+            createdById = creatorId,
+            createdByName = creatorName,
+            createdAt = now
         )
         _communities.value = listOf(newComm) + _communities.value
+        val updatedJoined = _joinedCommunityIds.value + newCommId
+        _joinedCommunityIds.value = updatedJoined
+        joinedPrefs.edit().putStringSet("joined_ids", updatedJoined).apply()
 
         val fs = firestore
         if (fs != null) {
@@ -1298,9 +1761,12 @@ class SlatyRepository(private val context: Context) {
                         "category" to newComm.category,
                         "unreadCount" to newComm.unreadCount,
                         "subjects" to newComm.subjects,
-                        "academicLevels" to newComm.academicLevels
+                        "academicLevels" to newComm.academicLevels,
+                        "createdById" to newComm.createdById,
+                        "createdByName" to newComm.createdByName,
+                        "createdAt" to newComm.createdAt
                     )
-                    fs.collection("communities").document(newComm.id).set(data).await()
+                    fs.collection("communities").document(newComm.id).set(data, SetOptions.merge()).await()
                 } catch (e: Exception) {
                     Log.w("SlatyRepository", "Failed to upload new community to Firestore: ${e.message}")
                 }
@@ -1308,12 +1774,55 @@ class SlatyRepository(private val context: Context) {
         }
     }
 
+    fun deleteCommunity(communityId: String): Boolean {
+        val target = _communities.value.firstOrNull { it.id == communityId } ?: return false
+        val myUid = getCurrentActorId()
+        if (!isCommunityCreator(target, myUid)) {
+            return false
+        }
+
+        // Optimistic removal from UI, joined list, and notifications
+        _communities.value = _communities.value.filterNot { it.id == communityId }
+        val updatedJoined = _joinedCommunityIds.value - communityId
+        _joinedCommunityIds.value = updatedJoined
+        joinedPrefs.edit().putStringSet("joined_ids", updatedJoined).apply()
+        _notifications.value = _notifications.value.filterNot { it.communityId == communityId }
+
+        val fs = firestore
+        if (fs != null) {
+            repoScope.launch {
+                try {
+                    val msgs = fs.collection("communities")
+                        .document(communityId)
+                        .collection("messages")
+                        .get()
+                        .await()
+                    if (!msgs.isEmpty) {
+                        val batch = fs.batch()
+                        msgs.documents.forEach { batch.delete(it.reference) }
+                        batch.commit().await()
+                    }
+                    fs.collection("communities").document(communityId).delete().await()
+                    Log.i("SlatyRepository", "Deleted community $communityId from Firestore")
+                } catch (e: Exception) {
+                    Log.w("SlatyRepository", "Failed deleting community from Firestore: ${e.message}")
+                }
+            }
+        }
+        return true
+    }
+
     fun logout() {
+        val uid = getCurrentActorId()
+        if (uid.isNotBlank()) {
+            updateOnlinePresence(uid, false)
+        }
         _currentUser.value = null
     }
 
     fun setUser(user: User) {
         _currentUser.value = user
+        updateOnlinePresence(user.id, true)
         seedPlatformDataIfEmpty(user.id, user.name)
     }
 

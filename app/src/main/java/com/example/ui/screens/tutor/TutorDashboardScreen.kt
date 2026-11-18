@@ -24,6 +24,7 @@ import com.example.model.TaskItem
 import com.example.model.TaskStatus
 import com.example.model.User
 import com.example.ui.theme.*
+import java.util.Locale
 
 @Composable
 fun TutorDashboardScreen(
@@ -97,9 +98,11 @@ fun TutorDashboardScreen(
 
         // Quick Stats row
         item {
+            val formattedRating = String.format(Locale.US, "%.2f", user?.rating ?: 4.9)
+            val reviewCount = user?.reviewsCount ?: 0
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Surface(
                     modifier = Modifier.weight(1f),
@@ -107,15 +110,16 @@ fun TutorDashboardScreen(
                     color = Color(0xFF1F1C2F),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF332D48))
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text("Active Tasks", color = SlatyTextSecondary, fontSize = 12.sp)
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Active Tasks", color = SlatyTextSecondary, fontSize = 11.sp, maxLines = 1)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "${myTasks.count { it.status == TaskStatus.ACCEPTED }}",
                             color = SlatyMint,
-                            fontSize = 24.sp,
+                            fontSize = 22.sp,
                             fontWeight = FontWeight.Bold
                         )
+                        Text("in progress", color = SlatyTextSecondary, fontSize = 10.sp)
                     }
                 }
 
@@ -125,14 +129,42 @@ fun TutorDashboardScreen(
                     color = Color(0xFF1F1C2F),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF332D48))
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text("Completed", color = SlatyTextSecondary, fontSize = 12.sp)
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Completed", color = SlatyTextSecondary, fontSize = 11.sp, maxLines = 1)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "${myTasks.count { it.status == TaskStatus.COMPLETED }}",
                             color = SlatyLavender,
-                            fontSize = 24.sp,
+                            fontSize = 22.sp,
                             fontWeight = FontWeight.Bold
+                        )
+                        Text("solved", color = SlatyTextSecondary, fontSize = 10.sp)
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("tutor_dashboard_rating_card"),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF1F1C2F),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SlatyAccentYellow.copy(alpha = 0.45f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Tutor Rating", color = SlatyTextSecondary, fontSize = 11.sp, maxLines = 1)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "★ $formattedRating",
+                            color = SlatyAccentYellow,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "$reviewCount review${if (reviewCount == 1) "" else "s"}",
+                            color = SlatyTextSecondary,
+                            fontSize = 10.sp,
+                            maxLines = 1
                         )
                     }
                 }

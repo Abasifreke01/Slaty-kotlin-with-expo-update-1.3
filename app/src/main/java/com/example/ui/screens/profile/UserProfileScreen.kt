@@ -67,6 +67,8 @@ fun UserProfileScreen(
     var isLoadingDoc by remember { mutableStateOf(true) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var showResetDialog by remember { mutableStateOf(false) }
+    var displayRating by remember(user?.rating) { mutableStateOf(user?.rating ?: 4.9) }
+    var displayReviewsCount by remember(user?.reviewsCount) { mutableStateOf(user?.reviewsCount ?: 0) }
 
     val isTutor = user?.role == UserRole.TUTOR
 
@@ -96,6 +98,8 @@ fun UserProfileScreen(
                     doc.getString("accountNumber")?.let { accountNumber = it }
                     doc.getString("accountName")?.let { accountName = it }
                     doc.getDouble("hourlyRate")?.let { hourlyRate = it.toInt().toString() }
+                    doc.getDouble("rating")?.let { displayRating = it }
+                    doc.getLong("reviewsCount")?.let { displayReviewsCount = it.toInt() }
                 }
             } catch (e: Exception) {
                 android.util.Log.w("UserProfileScreen", "Could not fetch remote user doc: ${e.message}")
@@ -337,6 +341,36 @@ fun UserProfileScreen(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
+                }
+            }
+
+            if (isTutor) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF282218),
+                    border = BorderStroke(1.dp, SlatyAccentYellow.copy(alpha = 0.65f)),
+                    modifier = Modifier.testTag("tutor_profile_rating_badge")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "Tutor Rating",
+                            tint = SlatyAccentYellow,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        val avgText = String.format(java.util.Locale.US, "%.2f", displayRating)
+                        Text(
+                            text = "$avgText • $displayReviewsCount student review${if (displayReviewsCount == 1) "" else "s"}",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
 

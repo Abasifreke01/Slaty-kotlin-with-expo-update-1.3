@@ -476,4 +476,130 @@ class ExampleRobolectricTest {
         assertEquals(studentToken, skewedIcePayload.senderSessionToken)
         assertTrue(skewedIcePayload.senderSessionToken == offerSignal.offerSessionToken)
     }
+
+    @Test
+    fun `test rejoin after removal policy map and restoration`() {
+        val kickedMap = mapOf("stu_banned" to "Chinedu Okafor")
+        val policyAfterKick = com.example.model.LiveRoomPolicy(
+            hostId = "tutor_1",
+            kickedUserIds = listOf("stu_banned"),
+            kickedUsers = kickedMap
+        )
+        assertTrue("stu_banned" in policyAfterKick.kickedUserIds)
+        assertEquals("Chinedu Okafor", policyAfterKick.kickedUsers["stu_banned"])
+
+        // Simulate tutor granting rejoin access
+        val updatedIds = policyAfterKick.kickedUserIds - "stu_banned"
+        val updatedUsers = policyAfterKick.kickedUsers - "stu_banned"
+        val policyAfterAllowRejoin = policyAfterKick.copy(
+            kickedUserIds = updatedIds,
+            kickedUsers = updatedUsers
+        )
+        assertTrue("stu_banned" !in policyAfterAllowRejoin.kickedUserIds)
+        assertTrue(policyAfterAllowRejoin.kickedUsers.isEmpty())
+    }
+
+    @Test
+    fun `test calculateNewAverageRating accuracy and tutor rating profile update`() {
+        // Formula: ((4.0 * 4) + 5) / 5 = 21 / 5 = 4.20
+        val (avg1, count1) = com.example.data.SlatyRepository.calculateNewAverageRating(4.0, 4, 5)
+        assertEquals(4.2, avg1, 0.001)
+        assertEquals(5, count1)
+
+        // First rating when count is 0
+        val (avg2, count2) = com.example.data.SlatyRepository.calculateNewAverageRating(0.0, 0, 5)
+        assertEquals(5.0, avg2, 0.001)
+        assertEquals(1, count2)
+
+        // End-to-end optimistic update on catalog tutor in repository
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = com.example.data.SlatyRepository(context)
+        val initialTutor = repository.tutors.value.first { it.id == "tutor_1" }
+        val expected = com.example.data.SlatyRepository.calculateNewAverageRating(
+            initialTutor.rating,
+            initialTutor.reviewsCount,
+            1
+        )
+        repository.submitTutorRating(
+            tutorId = initialTutor.id,
+            tutorName = initialTutor.name,
+            roomCode = "slaty-phy-live",
+            stars = 1,
+            comment = "Good session"
+        )
+        val updatedTutor = repository.tutors.value.first { it.id == "tutor_1" }
+        assertEquals(expected.first, updatedTutor.rating, 0.001)
+        assertEquals(expected.second, updatedTutor.reviewsCount)
+    }
+
+    @Test
+    fun `test community creator ownership check and group deletion`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = com.example.data.SlatyRepository(context)
+
+        val creator = com.example.model.User(
+            id = "creator_uid_1",
+            name = "Ada Creator",
+            username = "ada_creator",
+            email = "ada@slaty.edu.ng",
+            role = UserRole.STUDENT
+        )
+        repository.setUser(creator)
+        repository.createCommunity("Quantum Mechanics Circle", "Peer prep for PHY 301", "Physics")
+
+        val createdGroup = repository.communities.value.first { it.name == "Quantum Mechanics Circle" }
+        assertEquals("creator_uid_1", createdGroup.createdById)
+        assertTrue(repository.isCommunityCreator(createdGroup, "creator_uid_1"))
+        assertTrue(!repository.isCommunityCreator(createdGroup, "someone_else"))
+
+        // Switch to another user and verify deletion is rejected
+        repository.setUser(creator.copy(id = "other_user_uid", name = "Other User"))
+        val deletedByNonCreator = repository.deleteCommunity(createdGroup.id)
+        assertEquals(false, deletedByNonCreator)
+        assertTrue(repository.communities.value.any { it.id == createdGroup.id })
+
+        // Switch back to creator and verify deletion succeeds
+        repository.setUser(creator)
+        val deletedByCreator = repository.deleteCommunity(createdGroup.id)
+        assertTrue(deletedByCreator)
+        assertTrue(repository.communities.value.none { it.id == createdGroup.id })
+    }
+
+    @Test
+    fun `test community online notification filtering by joined membership and qa popup payload`() = testScope.runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = com.example.data.SlatyRepository(context)
+
+        // Joined user sees comm_1 notifications; comm_2 is hidden until joined
+        repository.leaveCommunity("comm_2")
+        repository.joinCommunity("comm_1")
+        val initialFiltered = repository.filteredNotifications.first()
+        assertTrue(initialFiltered.any { it.communityId == "comm_1" })
+        assertTrue(initialFiltered.none { it.communityId == "comm_2" })
+
+        repository.joinCommunity("comm_2")
+        val afterJoinFiltered = repository.filteredNotifications.first()
+        assertTrue(afterJoinFiltered.any { it.communityId == "comm_2" })
+
+        // Verify In-Class Q&A and CommunityNotificationEvent models
+        val qaMsg = com.example.model.LiveClassMessage(
+            id = "qa_1",
+            senderId = "stu_44",
+            senderName = "Tobi Bakare",
+            senderRole = UserRole.STUDENT,
+            text = "Why does entropy increase in an irreversible adiabatic process?",
+            isQuestion = true
+        )
+        assertTrue(qaMsg.isQuestion)
+
+        val onlineEvent = com.example.model.CommunityNotificationEvent(
+            id = "evt_1",
+            communityId = "comm_1",
+            communityName = "Engineering & Math Prep",
+            senderName = "Ngozi Eze",
+            messageText = "Uploaded solved Laplace worksheet"
+        )
+        assertEquals("comm_1", onlineEvent.communityId)
+        assertEquals("Ngozi Eze", onlineEvent.senderName)
+    }
 }

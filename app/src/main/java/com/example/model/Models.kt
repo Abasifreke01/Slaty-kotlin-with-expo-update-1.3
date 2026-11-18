@@ -23,6 +23,7 @@ data class User(
     val bio: String = "",
     val hourlyRate: Double = 3500.0,
     val rating: Double = 4.9,
+    val reviewsCount: Int = 0,
     val studentsCount: Int = 142,
     val bankName: String = "GTBank",
     val accountNumber: String = "0123456789",
@@ -111,7 +112,10 @@ data class Community(
     val unreadCount: Int = 0,
     val iconName: String = "ic_community",
     val subjects: List<String> = listOf("General"),
-    val academicLevels: List<String> = listOf("Undergraduate", "JAMB/UTME")
+    val academicLevels: List<String> = listOf("Undergraduate", "JAMB/UTME"),
+    val createdById: String = "",
+    val createdByName: String = "",
+    val createdAt: Long = 0L
 )
 
 data class ChatMessage(
@@ -200,7 +204,29 @@ data class LiveRoomPolicy(
     val screenShareTitle: String = "",
     val isClassEnded: Boolean = false,
     val kickedUserIds: List<String> = emptyList(),
+    val kickedUsers: Map<String, String> = emptyMap(),
     val updatedAt: Long = System.currentTimeMillis()
+)
+
+data class TutorRatingSubmission(
+    val id: String = "",
+    val tutorId: String = "",
+    val tutorName: String = "",
+    val roomCode: String = "",
+    val studentId: String = "",
+    val studentName: String = "",
+    val stars: Int = 5,
+    val comment: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class CommunityNotificationEvent(
+    val id: String,
+    val communityId: String,
+    val communityName: String,
+    val senderName: String,
+    val messageText: String,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 data class WebRtcSignalChannel(

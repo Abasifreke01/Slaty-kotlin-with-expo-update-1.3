@@ -190,6 +190,19 @@ fun SlatyApp(
         }
     }
 
+    // Deliver online push + in-app notifications to joined members across all communities
+    LaunchedEffect(Unit) {
+        viewModel.communityNotificationEvents.collect { event ->
+            NotificationHelper.showNewMessageNotification(
+                context = context,
+                senderName = event.communityName,
+                messageText = "${event.senderName}: ${event.messageText}",
+                isCommunity = true
+            )
+            snackbarHostState.showSnackbar("New message in ${event.communityName}: ${event.senderName}")
+        }
+    }
+
     // Sync AuthenticationViewModel with app state and manage Navigation transition
     LaunchedEffect(authUiState) {
         when (val state = authUiState) {
@@ -393,16 +406,19 @@ fun SlatyApp(
                 },
                 bottomBar = {
                     if (currentUser != null && subScreen is SubScreen.None) {
+                        val unreadConnect = communities
+                            .filter { joinedCommunityIds.contains(it.id) }
+                            .sumOf { it.unreadCount }
                         if (currentUser?.role == UserRole.STUDENT) {
                             SlatyStudentBottomBar(
                                 selectedTab = studentTab,
-                                unreadConnectCount = 3,
+                                unreadConnectCount = unreadConnect,
                                 onTabSelected = { viewModel.setStudentTab(it) }
                             )
                         } else {
                             SlatyTutorBottomBar(
                                 selectedTab = tutorTab,
-                                unreadConnectCount = 1,
+                                unreadConnectCount = unreadConnect,
                                 onTabSelected = { viewModel.setTutorTab(it) }
                             )
                         }
@@ -444,7 +460,9 @@ fun SlatyApp(
                                 SubScreen.LiveVideoRoom(
                                     title = "1-on-1 Session with ${t.name}",
                                     roomCode = "slaty-session-${t.id}",
-                                    isHost = false
+                                    isHost = false,
+                                    tutorId = t.id,
+                                    tutorName = t.name
                                 )
                             )
                         }
@@ -495,14 +513,6 @@ fun SlatyApp(
                         onBack = { viewModel.goBack() },
                         onSendMessage = { text ->
                             viewModel.sendCommunityMsg(community.id, text)
-                            if (viewModel.isCommunityJoined(community.id)) {
-                                NotificationHelper.showNewMessageNotification(
-                                    context = context,
-                                    senderName = community.name,
-                                    messageText = "${currentUser?.name ?: "Learner"}: $text",
-                                    isCommunity = true
-                                )
-                            }
                         }
                     )
                 }
@@ -537,8 +547,13 @@ fun SlatyApp(
                         title = room.title,
                         roomCode = room.roomCode,
                         isHost = room.isHost,
+                        tutorId = room.tutorId,
+                        tutorName = room.tutorName,
                         currentUser = currentUser,
                         liveClassRepo = viewModel.repository.liveClassRepository,
+                        onSubmitTutorRating = { tId, tName, stars, comment ->
+                            viewModel.submitTutorRating(tId, tName, room.roomCode, stars, comment)
+                        },
                         onLeaveCall = { viewModel.goBack() }
                     )
                 }
@@ -580,8 +595,16 @@ fun SlatyApp(
                                 liveClasses = liveClasses,
                                 communities = communities,
                                 cbtSubjects = cbtSubjects,
-                                onJoinLiveClass = { code, title ->
-                                    viewModel.navigateTo(SubScreen.LiveVideoRoom(title, code, false))
+                                onJoinLiveClass = { code, title, tutorId, tutorName ->
+                                    viewModel.navigateTo(
+                                        SubScreen.LiveVideoRoom(
+                                            title = title,
+                                            roomCode = code,
+                                            isHost = false,
+                                            tutorId = tutorId,
+                                            tutorName = tutorName
+                                        )
+                                    )
                                 },
                                 onOpenStudyGroup = { comm ->
                                     viewModel.navigateTo(SubScreen.CommunityChat(comm))
@@ -642,12 +665,14 @@ fun SlatyApp(
                         StudentTab.LIVE_CLASSES -> {
                             StudentLiveClassesScreen(
                                 classes = liveClasses,
-                                onJoinClass = { roomCode, title ->
+                                onJoinClass = { roomCode, title, tutorId, tutorName ->
                                     viewModel.navigateTo(
                                         SubScreen.LiveVideoRoom(
                                             title = title,
                                             roomCode = roomCode,
-                                            isHost = false
+                                            isHost = false,
+                                            tutorId = tutorId,
+                                            tutorName = tutorName
                                         )
                                     )
                                 }
@@ -658,9 +683,11 @@ fun SlatyApp(
                                 communities = communities,
                                 joinedCommunityIds = joinedCommunityIds,
                                 privateChats = privateChats,
+                                currentUserId = currentUser?.id ?: "",
                                 onCommunityClick = { comm -> viewModel.navigateTo(SubScreen.CommunityChat(comm)) },
                                 onJoinCommunity = { id -> viewModel.joinCommunity(id) },
                                 onLeaveCommunity = { id -> viewModel.leaveCommunity(id) },
+                                onDeleteCommunity = { comm -> viewModel.deleteCommunity(comm.id) },
                                 onPrivateChatClick = { chat -> viewModel.navigateTo(SubScreen.PrivateChat(chat)) },
                                 onCreateCommunityClick = { showCreateCommunityDialog = true }
                             )
@@ -718,9 +745,11 @@ fun SlatyApp(
                                 communities = communities,
                                 joinedCommunityIds = joinedCommunityIds,
                                 privateChats = privateChats,
+                                currentUserId = currentUser?.id ?: "",
                                 onCommunityClick = { comm -> viewModel.navigateTo(SubScreen.CommunityChat(comm)) },
                                 onJoinCommunity = { id -> viewModel.joinCommunity(id) },
                                 onLeaveCommunity = { id -> viewModel.leaveCommunity(id) },
+                                onDeleteCommunity = { comm -> viewModel.deleteCommunity(comm.id) },
                                 onPrivateChatClick = { chat -> viewModel.navigateTo(SubScreen.PrivateChat(chat)) },
                                 onCreateCommunityClick = { showCreateCommunityDialog = true }
                             )

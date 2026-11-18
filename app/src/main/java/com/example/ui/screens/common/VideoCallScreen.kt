@@ -19,6 +19,11 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -92,8 +97,11 @@ fun VideoCallScreen(
     title: String,
     roomCode: String,
     isHost: Boolean,
+    tutorId: String = "",
+    tutorName: String = "",
     currentUser: User? = null,
     liveClassRepo: LiveClassRepository? = null,
+    onSubmitTutorRating: ((tutorId: String, tutorName: String, stars: Int, comment: String) -> Unit)? = null,
     onLeaveCall: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -170,12 +178,19 @@ fun VideoCallScreen(
     var latestHandRaiseAlert by remember { mutableStateOf<String?>(null) }
     var activeFloatingReaction by remember { mutableStateOf<Pair<String, String>?>(null) }
 
-    // Chat & Notes drafts
+    // Chat & Notes drafts + In-Class Q&A Pop-Up & Rating states
     var messageText by remember { mutableStateOf("") }
     var isQuestionFilter by remember { mutableStateOf(false) }
     var markAsQuestion by remember { mutableStateOf(false) }
     var notesDraft by remember { mutableStateOf("") }
     var isNotesSaving by remember { mutableStateOf(false) }
+    val seenMessageIds = remember(cleanRoom) { mutableStateListOf<String>() }
+    var hasInitializedMessages by remember(cleanRoom) { mutableStateOf(false) }
+    var activeQaPopup by remember(cleanRoom) { mutableStateOf<LiveClassMessage?>(null) }
+    var unreadQaCount by remember(cleanRoom) { mutableIntStateOf(0) }
+    var showRateTutorDialog by remember(cleanRoom) { mutableStateOf(false) }
+    var hasRatedTutorThisSession by remember(cleanRoom) { mutableStateOf(false) }
+    var exitAfterRatingDialog by remember(cleanRoom) { mutableStateOf(false) }
 
     // Determine Tutor Supreme Authority & Enforced Permissions
     val hasSupremeControl = isHost ||
@@ -214,6 +229,39 @@ fun VideoCallScreen(
     LaunchedEffect(cleanRoom) {
         repo.observeRoomMessages(cleanRoom).collect { msgs ->
             inRoomMessages = msgs
+            if (!hasInitializedMessages) {
+                seenMessageIds.addAll(msgs.map { it.id })
+                hasInitializedMessages = true
+            } else {
+                val newIncoming = msgs.filter { msg ->
+                    msg.id.isNotBlank() &&
+                        msg.id !in seenMessageIds &&
+                        msg.senderId != participantUser.id
+                }
+                if (newIncoming.isNotEmpty()) {
+                    seenMessageIds.addAll(newIncoming.map { it.id })
+                    if (selectedTab != RoomInteractionTab.CHAT) {
+                        unreadQaCount += newIncoming.size
+                    }
+                    if (hasSupremeControl) {
+                        val latestImportant = newIncoming.lastOrNull { it.isQuestion } ?: newIncoming.lastOrNull()
+                        if (latestImportant != null && (selectedTab != RoomInteractionTab.CHAT || latestImportant.isQuestion)) {
+                            activeQaPopup = latestImportant
+                        }
+                    }
+                }
+            }
+        }
+    }
+    LaunchedEffect(activeQaPopup?.id) {
+        if (activeQaPopup != null) {
+            delay(9000L)
+            activeQaPopup = null
+        }
+    }
+    LaunchedEffect(isKickedByTutor) {
+        if (isKickedByTutor) {
+            hasJoinedSuccessfully = false
         }
     }
     LaunchedEffect(cleanRoom) {
@@ -232,12 +280,47 @@ fun VideoCallScreen(
         }
     }
 
+    val effectiveTutorId = remember(tutorId, roomPolicy.hostId, participants) {
+        tutorId.ifBlank { roomPolicy.hostId }
+            .ifBlank { participants.firstOrNull { it.isHost || it.role == UserRole.TUTOR }?.userId ?: "" }
+    }
+    val effectiveTutorName = remember(tutorName, roomPolicy.hostName, participants) {
+        tutorName.ifBlank { roomPolicy.hostName }
+            .ifBlank { participants.firstOrNull { it.isHost || it.role == UserRole.TUTOR }?.name ?: "Class Tutor" }
+    }
+
+    if (showRateTutorDialog) {
+        RateTutorEndOfClassDialog(
+            tutorName = effectiveTutorName,
+            classTitle = title,
+            confirmButtonLabel = if (exitAfterRatingDialog) "Submit & Leave" else "Submit Rating",
+            dismissButtonLabel = if (exitAfterRatingDialog) "Skip & Leave" else "Cancel",
+            onDismiss = {
+                showRateTutorDialog = false
+                if (exitAfterRatingDialog) {
+                    exitAfterRatingDialog = false
+                    onLeaveCall()
+                }
+            },
+            onSubmit = { stars, comment ->
+                hasRatedTutorThisSession = true
+                showRateTutorDialog = false
+                onSubmitTutorRating?.invoke(effectiveTutorId, effectiveTutorName, stars, comment)
+                Toast.makeText(context, "Rated $effectiveTutorName $stars/5 ★", Toast.LENGTH_SHORT).show()
+                if (exitAfterRatingDialog) {
+                    exitAfterRatingDialog = false
+                    onLeaveCall()
+                }
+            }
+        )
+    }
+
     // Gate checks before rendering main WebRTC classroom
     if (isKickedByTutor) {
         ClassroomStatusGateScreen(
             topBarTitle = title,
             headline = "Removed from Classroom",
-            description = "The tutor has removed you from this live classroom session.",
+            description = "The tutor has removed you from this live classroom session. If the tutor permits you to rejoin, you will automatically re-enter.",
             accentColor = SlatyError,
             isErrorIcon = true,
             onExit = onLeaveCall,
@@ -253,6 +336,13 @@ fun VideoCallScreen(
             description = "The tutor has ended '$title'. Thank you for attending!",
             accentColor = SlatyMint,
             isErrorIcon = false,
+            rateTutorLabel = "Rate $effectiveTutorName",
+            onRateTutor = if (!hasRatedTutorThisSession && onSubmitTutorRating != null) {
+                {
+                    exitAfterRatingDialog = false
+                    showRateTutorDialog = true
+                }
+            } else null,
             onExit = onLeaveCall,
             modifier = modifier
         )
@@ -668,8 +758,14 @@ fun VideoCallScreen(
             },
             onKickParticipant = { student ->
                 scope.launch {
-                    repo.kickParticipant(cleanRoom, student.userId)
+                    repo.kickParticipant(cleanRoom, student.userId, student.name)
                     Toast.makeText(context, "${student.name} removed from class", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onAllowRejoin = { targetUid ->
+                scope.launch {
+                    repo.allowParticipantRejoin(cleanRoom, targetUid)
+                    Toast.makeText(context, "Student can now rejoin the classroom", Toast.LENGTH_SHORT).show()
                 }
             },
             onEndClassForAll = {
@@ -969,7 +1065,12 @@ fun VideoCallScreen(
                             val isSelected = selectedTab == tab
                             Tab(
                                 selected = isSelected,
-                                onClick = { selectedTab = tab },
+                                onClick = {
+                                    selectedTab = tab
+                                    if (tab == RoomInteractionTab.CHAT) {
+                                        unreadQaCount = 0
+                                    }
+                                },
                                 text = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
@@ -994,14 +1095,30 @@ fun VideoCallScreen(
                                                 )
                                             }
                                         }
-                                        if (tab == RoomInteractionTab.CHAT && inRoomMessages.isNotEmpty()) {
+                                        if (tab == RoomInteractionTab.CHAT && (unreadQaCount > 0 || inRoomMessages.isNotEmpty())) {
                                             Spacer(modifier = Modifier.width(6.dp))
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(CircleShape)
-                                                    .background(SlatyPrimary)
-                                                    .size(6.dp)
-                                            )
+                                            if (unreadQaCount > 0) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .background(Color(0xFFFF9800))
+                                                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "$unreadQaCount",
+                                                        color = Color.Black,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.ExtraBold
+                                                    )
+                                                }
+                                            } else {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(CircleShape)
+                                                        .background(SlatyPrimary)
+                                                        .size(6.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1236,6 +1353,9 @@ fun VideoCallScreen(
                             onClick = {
                                 if (hasSupremeControl) {
                                     showTutorControlsSheet = true
+                                } else if (!hasRatedTutorThisSession && onSubmitTutorRating != null) {
+                                    exitAfterRatingDialog = true
+                                    showRateTutorDialog = true
                                 } else {
                                     onLeaveCall()
                                 }
@@ -2169,7 +2289,7 @@ fun VideoCallScreen(
                                 },
                                 onKick = {
                                     scope.launch {
-                                        repo.kickParticipant(cleanRoom, p.userId)
+                                        repo.kickParticipant(cleanRoom, p.userId, p.name)
                                         Toast.makeText(context, "${p.name} removed from class", Toast.LENGTH_SHORT).show()
                                     }
                                 }
@@ -2281,6 +2401,90 @@ fun VideoCallScreen(
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
+                    }
+                }
+            }
+
+            // In-Class Q&A Pop-Up Notification for Tutor
+            AnimatedVisibility(
+                visible = hasSupremeControl && activeQaPopup != null,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                activeQaPopup?.let { popupMsg ->
+                    val accent = if (popupMsg.isQuestion) Color(0xFFFF9800) else SlatyMint
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xF5191529),
+                        border = BorderStroke(1.5.dp, accent),
+                        shadowElevation = 10.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tutor_qa_popup")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(accent.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (popupMsg.isQuestion) Icons.Default.LiveHelp else Icons.Default.QuestionAnswer,
+                                    contentDescription = "New In-Class Q&A",
+                                    tint = accent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (popupMsg.isQuestion) "New Question • ${popupMsg.senderName}" else "In-Class Q&A • ${popupMsg.senderName}",
+                                    color = accent,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = popupMsg.text,
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            TextButton(
+                                onClick = {
+                                    isQuestionFilter = popupMsg.isQuestion
+                                    selectedTab = RoomInteractionTab.CHAT
+                                    unreadQaCount = 0
+                                    activeQaPopup = null
+                                },
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .testTag("tutor_qa_popup_open_button")
+                            ) {
+                                Text("Reply", color = SlatyMint, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            IconButton(
+                                onClick = { activeQaPopup = null },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("tutor_qa_popup_dismiss_button")
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss Q&A Alert", tint = Color.LightGray, modifier = Modifier.size(18.dp))
+                            }
+                        }
                     }
                 }
             }

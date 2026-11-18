@@ -123,6 +123,17 @@ service cloud.firestore {
     }
 
     /* ================================
+       🧑‍🏫 TUTOR PROFILES & RATINGS
+       ================================ */
+    match /tutors/{tutorId} {
+      allow read, write: if true;
+    }
+
+    match /tutor_ratings/{ratingId} {
+      allow read, write: if true;
+    }
+
+    /* ================================
        📨 LEGACY MESSAGES
        ================================ */
     match /messages/{messageId} {
